@@ -8,6 +8,9 @@ import os
 import re
 import tempfile
 from pathlib import Path
+import shutil
+import uuid
+import io
 
 # Configuração da página
 st.set_page_config(
@@ -81,6 +84,54 @@ def encontrar_formatos(url):
         st.error(f"Erro ao processar o vídeo: {str(e)}")
         return None, None, None
 
+# Método para baixar o vídeo e retornar os bytes
+def baixar_video_direto(url, formato=None):
+    try:
+        # Criar um ID único para este download
+        download_id = str(uuid.uuid4())
+        
+        # Criar diretório temporário no /tmp do sistema
+        diretorio_temp = os.path.join("/tmp", download_id)
+        os.makedirs(diretorio_temp, exist_ok=True)
+        
+        # Arquivo temporário para o download
+        arquivo_temp = os.path.join(diretorio_temp, "video.mp4")
+        
+        # Preparar o comando
+        comando = ["yt-dlp", "--merge-output-format", "mp4"]
+        
+        # Adicionar formato se especificado
+        if formato:
+            comando.extend(["-f", formato])
+        else:
+            comando.extend(["-f", "bestvideo[height<=1080]+bestaudio/best[height<=1080]"])
+        
+        # Adicionar o caminho de saída e a URL
+        comando.extend(["-o", arquivo_temp, url])
+        
+        # Executar o download (sem capturar stdout para permitir progresso)
+        processo = subprocess.run(comando, check=True)
+        
+        # Verificar se o arquivo existe
+        if os.path.exists(arquivo_temp):
+            # Ler o arquivo em memória
+            with open(arquivo_temp, "rb") as f:
+                conteudo = f.read()
+            
+            # Limpar o diretório temporário
+            shutil.rmtree(diretorio_temp, ignore_errors=True)
+            
+            return conteudo
+        else:
+            st.error(f"Arquivo não encontrado após download: {arquivo_temp}")
+            return None
+    except subprocess.CalledProcessError as e:
+        st.error(f"Erro ao baixar vídeo: {e}")
+        return None
+    except Exception as e:
+        st.error(f"Erro inesperado: {e}")
+        return None
+
 # Quando o usuário colar a URL
 if url_video:
     # Verificar se é uma URL válida do YouTube
@@ -89,120 +140,71 @@ if url_video:
     else:
         # Botão para iniciar o download
         if st.button("Baixar Vídeo", type="primary"):
+            # Etapa 1: Analisar os formatos disponíveis
             with st.spinner("Analisando formatos disponíveis..."):
                 video, audio_pt, titulo = encontrar_formatos(url_video)
                 
                 if not titulo:
                     st.error("Não foi possível processar o vídeo. Tente novamente.")
                 else:
-                    # Criar diretório temporário para o download
-                    with tempfile.TemporaryDirectory() as temp_dir:
-                        # Nome seguro para o arquivo
-                        nome_seguro = re.sub(r'[^\w\-\. ]', '_', titulo)
-                        caminho_arquivo = os.path.join(temp_dir, f"{nome_seguro}.mp4")
+                    # Nome seguro para o arquivo
+                    nome_seguro = re.sub(r'[^\w\-\. ]', '_', titulo)
+                    nome_arquivo = f"{nome_seguro}.mp4"
+                    
+                    # Definir o formato para download
+                    formato_download = None
+                    if video and audio_pt:
+                        formato_download = f"{video['format_id']}+{audio_pt['format_id']}"
+                        st.info(f"Baixando vídeo {video.get('height', '')}p com áudio em português")
+                    else:
+                        st.info("Usando configuração padrão para o download")
+                    
+                    # Etapa 2: Baixar o vídeo
+                    with st.spinner(f"Baixando '{titulo}'..."):
+                        # Mostrar barra de progresso indeterminada
+                        progress_bar = st.progress(0)
                         
-                        try:
-                            # Construir comando com base nos formatos disponíveis
-                            comando_base = [
-                                "yt-dlp",
-                                "--merge-output-format", "mp4",
-                                "-o", caminho_arquivo
-                            ]
+                        # Tentar o download direto
+                        video_bytes = baixar_video_direto(url_video, formato_download)
+                        
+                        if video_bytes:
+                            # Download concluído
+                            progress_bar.progress(1.0)
+                            st.success("Download concluído!")
                             
-                            # Se encontrou vídeo HD e áudio PT, usar esses formatos específicos
-                            if video and audio_pt:
-                                formato = f"{video['format_id']}+{audio_pt['format_id']}"
-                                comando_base.extend(["-f", formato])
-                                st.info(f"Baixando vídeo {video.get('height', '')}p com áudio em português")
-                            else:
-                                # Fallback: tenta os melhores formatos gerais
-                                comando_base.extend(["-f", "bestvideo[height<=1080]+bestaudio/best[height<=1080]"])
-                                st.info("Áudio em português não disponível. Baixando com configuração padrão.")
+                            # Mostrar o tamanho do arquivo
+                            tamanho_mb = len(video_bytes) / (1024 * 1024)
+                            st.info(f"Tamanho do arquivo: {tamanho_mb:.1f} MB")
                             
-                            # Adicionar URL
-                            comando_base.append(url_video)
+                            # Oferecer o botão de download
+                            st.download_button(
+                                label=f"💾 Salvar '{nome_arquivo}'",
+                                data=video_bytes,
+                                file_name=nome_arquivo,
+                                mime="video/mp4"
+                            )
+                        else:
+                            st.error("Não foi possível baixar o vídeo. Tente novamente.")
                             
-                            # Iniciar o download
-                            with st.spinner(f"Baixando '{titulo}'..."):
-                                processo = subprocess.Popen(
-                                    comando_base,
-                                    stdout=subprocess.PIPE,
-                                    stderr=subprocess.PIPE,
-                                    text=True,
-                                    bufsize=1,
-                                    universal_newlines=True
-                                )
-                                
-                                # Mostrar progresso
-                                barra_progresso = st.progress(0)
-                                status = st.empty()
-                                
-                                # Ler saída e atualizar progresso
-                                for linha in processo.stdout:
-                                    if "%" in linha:
-                                        match = re.search(r'(\d+\.\d+)%', linha)
-                                        if match:
-                                            porcentagem = float(match.group(1))
-                                            barra_progresso.progress(porcentagem / 100)
-                                    status.text(linha.strip())
-                                
-                                # Verificar resultado
-                                if processo.wait() == 0:
-                                    barra_progresso.progress(1.0)
-                                    st.success("Download concluído!")
+                            # Tentar método alternativo mais simples
+                            st.warning("Tentando método alternativo...")
+                            try:
+                                with st.spinner("Último método de tentativa..."):
+                                    # Usar o formato mais simples possível
+                                    video_bytes_alt = baixar_video_direto(url_video, "best")
                                     
-                                    # Verificar se o arquivo foi criado
-                                    arquivo_baixado = Path(caminho_arquivo)
-                                    if arquivo_baixado.exists():
-                                        # Mostrar tamanho do arquivo
-                                        tamanho_mb = arquivo_baixado.stat().st_size / (1024 * 1024)
-                                        st.info(f"Tamanho do arquivo: {tamanho_mb:.1f} MB")
-                                        
-                                        # Botão de download
-                                        with open(arquivo_baixado, 'rb') as f:
-                                            st.download_button(
-                                                label=f"💾 Salvar '{nome_seguro}.mp4'",
-                                                data=f,
-                                                file_name=f"{nome_seguro}.mp4",
-                                                mime="video/mp4"
-                                            )
-                                        
-                                        st.info("Clique no botão acima para salvar o vídeo no seu dispositivo.")
-                                    else:
-                                        st.error("Arquivo não encontrado após o download.")
-                                else:
-                                    stderr = processo.stderr.read()
-                                    st.error(f"Erro durante o download: {stderr}")
-                                    
-                                    # Tentar uma abordagem alternativa se falhar
-                                    st.warning("Tentando método alternativo de download...")
-                                    
-                                    # Usar o formato "best" como fallback
-                                    comando_alternativo = [
-                                        "yt-dlp",
-                                        "--merge-output-format", "mp4",
-                                        "-f", "best",
-                                        "-o", caminho_arquivo,
-                                        url_video
-                                    ]
-                                    
-                                    processo_alt = subprocess.run(comando_alternativo, capture_output=True, text=True)
-                                    
-                                    if processo_alt.returncode == 0:
+                                    if video_bytes_alt:
                                         st.success("Download concluído com método alternativo!")
                                         
-                                        if os.path.exists(caminho_arquivo):
-                                            with open(caminho_arquivo, 'rb') as f:
-                                                st.download_button(
-                                                    label=f"💾 Salvar '{nome_seguro}.mp4'",
-                                                    data=f,
-                                                    file_name=f"{nome_seguro}.mp4",
-                                                    mime="video/mp4"
-                                                )
-                                    else:
-                                        st.error(f"Falha no método alternativo: {processo_alt.stderr}")
-                        except Exception as e:
-                            st.error(f"Erro ao baixar o vídeo: {str(e)}")
+                                        # Oferecer para download
+                                        st.download_button(
+                                            label=f"💾 Salvar '{nome_arquivo}'",
+                                            data=video_bytes_alt,
+                                            file_name=nome_arquivo,
+                                            mime="video/mp4"
+                                        )
+                            except Exception as e:
+                                st.error(f"Todos os métodos de download falharam: {e}")
 
 # Adicionar informações no rodapé
 st.markdown("---")
