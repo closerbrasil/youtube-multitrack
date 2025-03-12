@@ -23,47 +23,60 @@ st.write("Baixe vídeos do YouTube com áudio em português (quando disponível)
 # Campo para URL do vídeo
 url_video = st.text_input("Cole aqui a URL do vídeo do YouTube", placeholder="https://www.youtube.com/watch?v=...")
 
-# Função para obter o melhor formato de áudio em português
-def obter_melhor_formato(url):
+# Função para identificar os melhores formatos de vídeo e áudio em pt-BR
+def encontrar_formatos(url):
     try:
-        # Obter informações do vídeo
-        comando = ["yt-dlp", "-j", url]
-        resultado = subprocess.run(comando, capture_output=True, text=True)
+        # Obter informações detalhadas do vídeo
+        resultado = subprocess.run(
+            ["yt-dlp", "-j", url], 
+            capture_output=True, 
+            text=True
+        )
+        
         if resultado.returncode != 0:
             return None, None, None
         
         info = json.loads(resultado.stdout)
-        formatos = info.get("formats", [])
-        titulo = info.get("title", "Video")
+        titulo = info.get('title', 'Video')
+        formatos = info.get('formats', [])
         
-        # Encontrar melhor formato de vídeo (1080p ou menor)
+        # Procurar por áudios em português
+        audios_pt = []
+        for formato in formatos:
+            # Verificar se é um formato de áudio
+            if formato.get('vcodec') == 'none' and formato.get('acodec') != 'none':
+                idioma = str(formato.get('language', '')).lower()
+                
+                # Verificar se é português
+                if any(termo in idioma for termo in ['pt', 'br', 'portuguese']):
+                    audios_pt.append(formato)
+        
+        # Encontrar melhor formato de vídeo até 1080p
+        videos_hd = []
+        for formato in formatos:
+            # Verificar se é formato de vídeo sem áudio
+            if formato.get('acodec') == 'none' and formato.get('vcodec') != 'none':
+                altura = formato.get('height', 0)
+                if isinstance(altura, int) and altura <= 1080 and altura >= 720:
+                    videos_hd.append(formato)
+        
+        # Se encontrou formatos, ordenar por qualidade
+        melhor_audio_pt = None
+        if audios_pt:
+            # Ordenar por bitrate/qualidade
+            audios_pt.sort(key=lambda x: float(x.get('abr', 0) or 0), reverse=True)
+            melhor_audio_pt = audios_pt[0]
+            st.success(f"Áudio em português encontrado! ({melhor_audio_pt.get('format_id')})")
+        
         melhor_video = None
-        for formato in formatos:
-            if formato.get("acodec") == "none" and formato.get("vcodec") != "none":
-                resolucao = formato.get("resolution", "")
-                if isinstance(resolucao, str) and "x" in resolucao:
-                    altura = int(resolucao.split("x")[1])
-                    if altura <= 1080:
-                        if melhor_video is None or altura > int(melhor_video.get("resolution", "0x0").split("x")[1]):
-                            melhor_video = formato
+        if videos_hd:
+            # Ordenar por altura (resolução)
+            videos_hd.sort(key=lambda x: x.get('height', 0), reverse=True)
+            melhor_video = videos_hd[0]
+            st.success(f"Vídeo em alta definição encontrado: {melhor_video.get('height')}p")
         
-        # Encontrar melhor formato de áudio em português
-        melhor_audio = None
-        for formato in formatos:
-            if formato.get("vcodec") == "none" and formato.get("acodec") != "none":
-                idioma = str(formato.get("language", "")).lower()
-                if "pt" in idioma or "br" in idioma:
-                    if melhor_audio is None or formato.get("abr", 0) > melhor_audio.get("abr", 0):
-                        melhor_audio = formato
-        
-        # Se não encontrar áudio em português, usar o melhor áudio disponível
-        if not melhor_audio:
-            for formato in formatos:
-                if formato.get("vcodec") == "none" and formato.get("acodec") != "none":
-                    if melhor_audio is None or formato.get("abr", 0) > melhor_audio.get("abr", 0):
-                        melhor_audio = formato
-        
-        return melhor_video, melhor_audio, titulo
+        return melhor_video, melhor_audio_pt, titulo
+    
     except Exception as e:
         st.error(f"Erro ao processar o vídeo: {str(e)}")
         return None, None, None
@@ -76,73 +89,120 @@ if url_video:
     else:
         # Botão para iniciar o download
         if st.button("Baixar Vídeo", type="primary"):
-            with st.spinner("Processando o vídeo..."):
-                video, audio, titulo = obter_melhor_formato(url_video)
+            with st.spinner("Analisando formatos disponíveis..."):
+                video, audio_pt, titulo = encontrar_formatos(url_video)
                 
-                if not video or not audio:
+                if not titulo:
                     st.error("Não foi possível processar o vídeo. Tente novamente.")
                 else:
                     # Criar diretório temporário para o download
                     with tempfile.TemporaryDirectory() as temp_dir:
                         # Nome seguro para o arquivo
                         nome_seguro = re.sub(r'[^\w\-\. ]', '_', titulo)
-                        caminho_arquivo = os.path.join(temp_dir, f"{nome_seguro}.%(ext)s")
+                        caminho_arquivo = os.path.join(temp_dir, f"{nome_seguro}.mp4")
                         
-                        # Iniciar o download
-                        comando = [
-                            "yt-dlp",
-                            "-f", f"{video['format_id']}+{audio['format_id']}",
-                            "-o", caminho_arquivo,
-                            url_video
-                        ]
-                        
-                        processo = subprocess.Popen(
-                            comando,
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE,
-                            text=True,
-                            bufsize=1,
-                            universal_newlines=True
-                        )
-                        
-                        # Mostrar progresso
-                        barra_progresso = st.progress(0)
-                        status = st.empty()
-                        
-                        # Ler saída e atualizar progresso
-                        for linha in processo.stdout:
-                            if "%" in linha:
-                                match = re.search(r'(\d+\.\d+)%', linha)
-                                if match:
-                                    porcentagem = float(match.group(1))
-                                    barra_progresso.progress(porcentagem / 100)
-                            status.text(linha.strip())
-                        
-                        # Verificar resultado
-                        if processo.wait() == 0:
-                            barra_progresso.progress(1.0)
-                            st.success("Download concluído!")
+                        try:
+                            # Construir comando com base nos formatos disponíveis
+                            comando_base = [
+                                "yt-dlp",
+                                "--merge-output-format", "mp4",
+                                "-o", caminho_arquivo
+                            ]
                             
-                            # Encontrar o arquivo baixado
-                            arquivos = list(Path(temp_dir).glob("*.*"))
-                            if arquivos:
-                                arquivo_baixado = arquivos[0]
-                                
-                                # Ler o arquivo para download pelo usuário
-                                with open(arquivo_baixado, 'rb') as f:
-                                    st.download_button(
-                                        label=f"💾 Salvar '{nome_seguro}'",
-                                        data=f,
-                                        file_name=os.path.basename(arquivo_baixado),
-                                        mime="video/mp4"
-                                    )
-                                
-                                st.info("Clique no botão acima para salvar o vídeo no seu dispositivo.")
+                            # Se encontrou vídeo HD e áudio PT, usar esses formatos específicos
+                            if video and audio_pt:
+                                formato = f"{video['format_id']}+{audio_pt['format_id']}"
+                                comando_base.extend(["-f", formato])
+                                st.info(f"Baixando vídeo {video.get('height', '')}p com áudio em português")
                             else:
-                                st.error("Arquivo não encontrado após o download.")
-                        else:
-                            stderr = processo.stderr.read()
-                            st.error(f"Erro durante o download: {stderr}")
+                                # Fallback: tenta os melhores formatos gerais
+                                comando_base.extend(["-f", "bestvideo[height<=1080]+bestaudio/best[height<=1080]"])
+                                st.info("Áudio em português não disponível. Baixando com configuração padrão.")
+                            
+                            # Adicionar URL
+                            comando_base.append(url_video)
+                            
+                            # Iniciar o download
+                            with st.spinner(f"Baixando '{titulo}'..."):
+                                processo = subprocess.Popen(
+                                    comando_base,
+                                    stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE,
+                                    text=True,
+                                    bufsize=1,
+                                    universal_newlines=True
+                                )
+                                
+                                # Mostrar progresso
+                                barra_progresso = st.progress(0)
+                                status = st.empty()
+                                
+                                # Ler saída e atualizar progresso
+                                for linha in processo.stdout:
+                                    if "%" in linha:
+                                        match = re.search(r'(\d+\.\d+)%', linha)
+                                        if match:
+                                            porcentagem = float(match.group(1))
+                                            barra_progresso.progress(porcentagem / 100)
+                                    status.text(linha.strip())
+                                
+                                # Verificar resultado
+                                if processo.wait() == 0:
+                                    barra_progresso.progress(1.0)
+                                    st.success("Download concluído!")
+                                    
+                                    # Verificar se o arquivo foi criado
+                                    arquivo_baixado = Path(caminho_arquivo)
+                                    if arquivo_baixado.exists():
+                                        # Mostrar tamanho do arquivo
+                                        tamanho_mb = arquivo_baixado.stat().st_size / (1024 * 1024)
+                                        st.info(f"Tamanho do arquivo: {tamanho_mb:.1f} MB")
+                                        
+                                        # Botão de download
+                                        with open(arquivo_baixado, 'rb') as f:
+                                            st.download_button(
+                                                label=f"💾 Salvar '{nome_seguro}.mp4'",
+                                                data=f,
+                                                file_name=f"{nome_seguro}.mp4",
+                                                mime="video/mp4"
+                                            )
+                                        
+                                        st.info("Clique no botão acima para salvar o vídeo no seu dispositivo.")
+                                    else:
+                                        st.error("Arquivo não encontrado após o download.")
+                                else:
+                                    stderr = processo.stderr.read()
+                                    st.error(f"Erro durante o download: {stderr}")
+                                    
+                                    # Tentar uma abordagem alternativa se falhar
+                                    st.warning("Tentando método alternativo de download...")
+                                    
+                                    # Usar o formato "best" como fallback
+                                    comando_alternativo = [
+                                        "yt-dlp",
+                                        "--merge-output-format", "mp4",
+                                        "-f", "best",
+                                        "-o", caminho_arquivo,
+                                        url_video
+                                    ]
+                                    
+                                    processo_alt = subprocess.run(comando_alternativo, capture_output=True, text=True)
+                                    
+                                    if processo_alt.returncode == 0:
+                                        st.success("Download concluído com método alternativo!")
+                                        
+                                        if os.path.exists(caminho_arquivo):
+                                            with open(caminho_arquivo, 'rb') as f:
+                                                st.download_button(
+                                                    label=f"💾 Salvar '{nome_seguro}.mp4'",
+                                                    data=f,
+                                                    file_name=f"{nome_seguro}.mp4",
+                                                    mime="video/mp4"
+                                                )
+                                    else:
+                                        st.error(f"Falha no método alternativo: {processo_alt.stderr}")
+                        except Exception as e:
+                            st.error(f"Erro ao baixar o vídeo: {str(e)}")
 
 # Adicionar informações no rodapé
 st.markdown("---")
